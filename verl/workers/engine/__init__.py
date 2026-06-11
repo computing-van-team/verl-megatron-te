@@ -11,6 +11,14 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+try:
+    # Apply Ascend NPU monkey patches before any megatron import below (.fsdp imports
+    # megatron transitively). Broad except: torch_npu raises non-ImportError when CANN
+    # env is missing, which must not break non-NPU backends.
+    import megatron_adaptor  # noqa: F401
+except Exception:
+    pass
+
 from .base import BaseEngine, EngineRegistry
 from .fsdp import FSDPEngine, FSDPEngineWithLMHead
 
@@ -44,6 +52,16 @@ try:
 except ImportError:
     AutomodelEngine = None
     AutomodelEngineWithLMHead = None
+
+# MegatronAdaptor (Ascend NPU) must be imported before Megatron so its monkey patches
+# are in effect when megatron modules are first imported
+try:
+    from .megatron_adaptor import MegatronAdaptorEngineWithLMHead, MegatronAdaptorEngineWithValueHead
+
+    __all__ += ["MegatronAdaptorEngineWithLMHead", "MegatronAdaptorEngineWithValueHead"]
+except ImportError:
+    MegatronAdaptorEngineWithLMHead = None
+    MegatronAdaptorEngineWithValueHead = None
 
 # Mindspeed must be imported before Megatron to ensure the related monkey patches take effect as expected
 try:
