@@ -1,0 +1,13 @@
+--- /home/miniconda3/envs/b84_verl_017/lib/python3.10/site-packages/vllm_ascend/attention/attention_v1.py.bak_b84	2026-06-13 16:22:53.480000000 +0800
++++ /home/miniconda3/envs/b84_verl_017/lib/python3.10/site-packages/vllm_ascend/attention/attention_v1.py	2026-06-13 16:22:53.500000000 +0800
+@@ -649,7 +649,9 @@
+             if self.key_cache is None:
+                 self.key_cache, self.value_cache = kv_cache[0], kv_cache[1]
+             slots = attn_metadata.slot_mapping
+-            if get_ascend_device_type() == AscendDeviceType.A5:
++            # b84 patch: force A5 GQA to standard ND reshape_and_cache path (read path uses ND view),
++            # bypassing half-implemented NZ npu_scatter_pa_kv_cache in this 3-month build.
++            if False and get_ascend_device_type() == AscendDeviceType.A5:
+                 # TODO: Once eagle running to here, it may has error because of the 0 dim of slot_mapping.
+                 # Should check if the 0 dim of slot_mapping must equal to the 0 dim of key.
+                 # If it's necessary, the slots should be sliced.
