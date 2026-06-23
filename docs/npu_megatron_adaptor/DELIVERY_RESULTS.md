@@ -74,3 +74,50 @@
 - 8 卡 MoE 的**适配 + 显存**关已解（EP4×TP2+DP+recompute+offload，模型成功构建 4.4B 参数/卡）。
 - 全 30B 端到端 30 步在 .18 上被该平台层 507035 卡住；待 .54 类节点补「至-scale」corr + 性能（接 §2/§3）。
 - 运行脚本：env 可调的 run_30b.sh（DEVICES / NGPUS / EP / TP / RTP / GMU / RECOMPUTE / PO / GO / OO / CPUINIT / CANN_ENV / MXFP8 / STEPS / TAG）。
+
+## 6. 算子级 mxfp8 收益 + MFU roofline + card5 根因（2026-06-22/23）
+
+### 6.1 MoE 专家 GroupedLinear mxfp8 vs bf16（目标模型核心算子,稳态,128 专家 fc1 2048→1536）
+扫每专家 token 数(tok/expert),mxfp8/bf16 加速比:
+
+| tok/expert | 前向 | 训练(fwd+bwd) |
+|---|---|---|
+| 256 | 0.47x（慢2倍） | 0.86x |
+| 512 | 0.62x | 0.93x |
+| 1024 | 0.84x | **1.05x（训练拐点）** |
+| 2048 | **1.06x（前向拐点）** | 1.14x |
+| 4096 | 1.25x | 1.20x |
+| 8192 | **1.39x** | **1.24x** |
+
+- **mxfp8 专家 GEMM 是"饱和依赖":只有 tok/expert ≥ ~1024(训练)/ ~2048(前向)才反超 bf16**;低于阈值量化开销主导、反而更慢。
+- 饱和后:训练 ~1.24x、前向 ~1.39x。绝对算力:bf16 grouped 峰值 ~400 TFLOPs,mxfp8 ~556 TFLOPs。
+- 交付含义:全 30B(大 batch、专家喂饱)才能吃到 mxfp8 的 MoE 收益;小 batch/小规模会落在拐点左侧、得不偿失。
+
+### 6.2 MFU 直接由 M(每卡每前向 token 数)决定
+**算子级**(单个 dense GEMM,bf16,950DT 实测峰值 ~427 TFLOPs):
+
+| M(token) | 2048×2048 util | 2048×6144 util |
+|---|---|---|
+| 256 | 13.6% | 40.6% |
+| 512 | 27.7% | 80.0% |
+| 2048 | 86.5% | 95.0% |
+| 8192 | 95.7% | 98.0% |
+| 65536 | 100% | 100% |
+
+→ 利用率几乎只是 M 的函数,脊点 ≈ M=2048,M≥16K 触顶。**M = micro_batch × seq_len(每卡);MoE 每专家 M 还要 ×top_k/专家数。**
+
+**模型级**(dense Qwen3-0.6B GRPO,只改 micro):
+
+| micro_batch | MFU | 吞吐 tok/s |
+|---|---|---|
+| 1 | 0.010 | ~460 |
+| 8 | 0.045 | ~1140 |
+| 32 | **0.158** | ~1495 |
+
+→ 模型 MFU 随 micro(=M)上升,与算子级 roofline 一致。注:模型 MFU < 单算子 util,差额 = 非-GEMM 开销(EP all-to-all、attention、norm、offload、kernel 气泡)以"时间"形式进 MFU 分母。
+
+### 6.3 全 30B 在 .18 受阻的根因 = card 5 坏卡（非适配、非 CANN 版本）
+- 8 卡全 30B 在模型 setup 期稳定崩 NPU 507035(向量核地址越界,stock 算子 fill_/load_weights)。
+- 定位:`DEVICES=5,0,1,2,3,4,6,7`(card5 挪 rank0)→ 507035 跟着报到 rank0;排除 card5 → 507035 归零。**故障跟物理 card5 走 = 该卡坏(大负载暴露,常规 health/ECC 抓不到)。**
+- 同型号 .54 / 同 T560 toolkit / 同 driver+firmware 正常 → 排除软件、CANN、适配。
+- 全 30B 需 8 卡 EP4×TP2(4.4B/卡);避开 card5 只剩 ≤7 卡无法分片到可放下 → **必须修/换 card5 才能跑全 30B 至-scale corr+MFU**。8 层代理仅验证流程+精度,给不了代表性 MFU。
